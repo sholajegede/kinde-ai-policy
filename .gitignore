@@ -1,0 +1,10 @@
+node_modules
+dist
+*.tgz
+*.tsbuildinfo
+.DS_Store
+.env
+BUILD_PLAN.md
+BUILD_LOG.md
+CLAUDE.md
+AGENTS.md

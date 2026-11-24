@@ -1,0 +1,83 @@
+{
+  "name": "kinde-ai-policy",
+  "version": "0.1.0",
+  "description": "Decide which AI models, output limits and budgets each Kinde user, organization or agent gets, and hand the decision to your AI gateway. Verifies the Kinde token, picks the plan, reserves budget before the call and settles it after.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Shola Jegede",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sholajegede/kinde-ai-policy.git"
+  },
+  "homepage": "https://github.com/sholajegede/kinde-ai-policy#readme",
+  "bugs": "https://github.com/sholajegede/kinde-ai-policy/issues",
+  "keywords": [
+    "kinde",
+    "ai",
+    "llm",
+    "ai-gateway",
+    "budgets",
+    "spend-limits",
+    "rate-limiting",
+    "entitlements",
+    "authorization",
+    "saas",
+    "ai-agents",
+    "m2m",
+    "openai",
+    "openrouter",
+    "litellm"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./openai-compatible": {
+      "import": {
+        "types": "./dist/openai-compatible.d.ts",
+        "default": "./dist/openai-compatible.js"
+      },
+      "require": {
+        "types": "./dist/openai-compatible.d.cts",
+        "default": "./dist/openai-compatible.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "jose": "^6.2.17"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "kinde-testkit": "^0.8.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.1"
+  }
+}

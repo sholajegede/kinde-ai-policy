@@ -1,7 +1,7 @@
 {
   "name": "kinde-ai-policy",
-  "version": "0.1.0",
-  "description": "Decide which AI models, output limits and budgets each Kinde user, organization or agent gets, and hand the decision to your AI gateway. Verifies the Kinde token, picks the plan, reserves budget before the call and settles it after.",
+  "version": "0.2.0",
+  "description": "Decide which AI models, output limits and budgets each Kinde user, organization or agent gets, from their Kinde plan and billing entitlements, and hand the decision to your AI gateway. Reserves budget before the call and settles it after.",
   "type": "module",
   "license": "MIT",
   "author": "Shola Jegede",
@@ -19,6 +19,7 @@
     "budgets",
     "spend-limits",
     "rate-limiting",
+    "billing",
     "entitlements",
     "authorization",
     "saas",
@@ -67,7 +68,8 @@
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --exclude 'test/contract/**'",
+    "test:contract": "vitest run test/contract",
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {

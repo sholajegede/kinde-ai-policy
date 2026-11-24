@@ -1,6 +1,6 @@
 # kinde-ai-policy
 
-Decide which AI models, output limits and budgets each Kinde user, organization or agent gets, and hand that decision to the AI gateway you already use. kinde-ai-policy reads a verified Kinde access token, picks the caller's plan, applies the grants for their permissions and roles, reserves budget before the model call and charges the real usage after it. It does not send the model call itself. Your code still calls OpenRouter, LiteLLM, Vercel AI Gateway, Portkey, Cloudflare AI Gateway or a provider directly, with the fields this package gives it.
+Decide which AI models, output limits and budgets each Kinde user, organization or agent gets, and hand that decision to the AI gateway you already use. kinde-ai-policy reads a verified Kinde access token, picks the caller's plan from Kinde billing or a feature flag, takes their limits from their Kinde entitlements, applies the grants for their permissions and roles, reserves budget before the model call and charges the real usage after it. It does not send the model call itself. Your code still calls OpenRouter, LiteLLM, Vercel AI Gateway, Portkey, Cloudflare AI Gateway or a provider directly, with the fields this package gives it.
 
 ![How kinde-ai-policy works: a Kinde access token and your policy go into decide(), which verifies the token, picks the plan, applies grants and agent caps, chooses the model and fallbacks, caps output tokens and checks every budget. prepare() reserves the worst-case cost in the budget store and renders the request for your gateway. settle() charges the real usage when the response comes back.](https://raw.githubusercontent.com/sholajegede/kinde-ai-policy/main/docs/how-it-works.png)
 
@@ -10,6 +10,7 @@ Decide which AI models, output limits and budgets each Kinde user, organization 
 - [Install](#install)
 - [Quick start](#quick-start)
 - [The policy](#the-policy)
+- [Plans and limits from Kinde billing](#plans-and-limits-from-kinde-billing)
 - [How a decision is made](#how-a-decision-is-made)
 - [Budgets](#budgets)
 - [AI agents with M2M tokens](#ai-agents-with-m2m-tokens)
@@ -29,6 +30,7 @@ kinde-ai-policy is that glue, written once:
 
 - It takes identity only from a verified Kinde access token, never from the request body.
 - The plan, models, fallbacks, output limits and budgets live in one JSON policy that you can review, test and load from anywhere.
+- Kinde billing stays the source of truth: the plan an organization pays for and the limits on that plan come from Kinde, so changing a price or a limit in Kinde changes what the caller gets.
 - Budgets are counted per organization, per user and per agent, by day, week or month.
 - Before the call it reserves the most the call could cost. After the call it charges what was actually used. Parallel requests cannot spend past a limit.
 - AI agents that sign in with Kinde M2M tokens get their own budgets and model limits inside their organization's plan.
@@ -120,17 +122,67 @@ A policy is plain JSON, so it can live in your code, a file or a database. `defi
 
 | Field | What it does |
 | --- | --- |
-| `plan.from` | Where to read the plan name, tried in order: `{ flag }` for a Kinde feature flag, `{ property }` for a Kinde property, `{ claim }` for any token claim. A name that is not in `plans` is skipped. |
+| `plan.from` | Where to read the plan name, tried in order: `{ billing: true }` for the plan the caller subscribes to in Kinde billing, `{ flag }` for a Kinde feature flag, `{ property }` for a Kinde property, `{ claim }` for any token claim. A name that is not in `plans` is skipped. |
 | `plan.fallback` | The plan for callers with no plan from those sources. Without it they are denied with `no_plan`. |
 | `plans.<name>.models` | The models this plan may use. The first one is the default. |
 | `plans.<name>.fallbacks` | Models for the gateway to try, in order, if the chosen one fails. Each must be in `models`. |
 | `plans.<name>.maxOutputTokens` | The most output tokens a single call may ask for. |
 | `plans.<name>.budgets` | Organization and user budgets: `{ scope, period, usd, tokens }`. |
+| `entitlements` | Kinde billing feature keys whose limit replaces a plan limit. See [Plans and limits from Kinde billing](#plans-and-limits-from-kinde-billing). |
+| `properties` | Kinde organization, user or application property keys whose number replaces a plan limit, for a deal you set by hand on one organization. |
 | `grants` | Extra access for one `permission`, `role` or `flag`: `addModels`, a higher `maxOutputTokens`, or user and agent `budgets` that replace the plan's budget with the same scope, period and unit. Grants cannot change organization budgets. |
 | `agents` | The policy for M2M tokens. See [AI agents with M2M tokens](#ai-agents-with-m2m-tokens). |
 | `requireOrganization` | Deny tokens without `org_code`. Defaults to `true`. |
 
-Kinde sets the plan however you run billing. A common setup is a string feature flag named `plan` with a different value per organization, which Kinde puts in the access token as `feature_flags.plan`. Kinde billing entitlements are read in the next release.
+If you sell plans with Kinde billing, read the plan from there. If you don't, a string feature flag named `plan` with a different value per organization works too, and Kinde puts it in the access token as `feature_flags.plan`.
+
+## Plans and limits from Kinde billing
+
+In Kinde billing, a plan has features, and each feature can have a limit. kinde-ai-policy reads the plan an organization subscribes to, and the limits on it, from Kinde's Management API, so your access tokens need no extra claims:
+
+```ts
+import { createAiPolicy, definePolicy, kindeManagementApi } from "kinde-ai-policy";
+
+export const policy = definePolicy({
+  plan: { from: [{ billing: true }], fallback: "free" },
+  plans: {
+    free: { models: ["openai/gpt-5-mini"], maxOutputTokens: 1024, budgets: [{ scope: "org", usd: 2, period: "month" }] },
+    pro: { models: ["anthropic/claude-sonnet-4.5", "openai/gpt-5-mini"], maxOutputTokens: 4096, budgets: [{ scope: "org", usd: 100, period: "month" }] },
+  },
+  entitlements: {
+    ai_monthly_usd: "budgets.org.usd.month",
+    ai_max_output: "maxOutputTokens",
+  },
+});
+
+const ai = createAiPolicy({
+  policy,
+  issuer: process.env.KINDE_ISSUER_URL!,
+  audience: process.env.KINDE_AUDIENCE!,
+  pricing,
+  entitlements: kindeManagementApi({
+    issuer: process.env.KINDE_ISSUER_URL!,
+    clientId: process.env.KINDE_M2M_CLIENT_ID!,
+    clientSecret: process.env.KINDE_M2M_CLIENT_SECRET!,
+  }),
+});
+```
+
+The names under `plans` are Kinde plan codes, so an organization on the `pro` plan in Kinde gets the `pro` plan here. The `ai_monthly_usd` feature's limit on that plan in Kinde replaces the $100, so when you raise it in Kinde the organization can spend more from the next lookup. A mapping target is `maxOutputTokens` or a budget written as `budgets.<org|user>.<usd|tokens>.<day|week|month>`. If the plan has no budget with that scope, unit and period, the entitlement adds one.
+
+Kinde reports an unlimited feature as `2147483647`. For a budget that removes the budget, and for `maxOutputTokens` it keeps the plan's limit. A feature with no limit in Kinde leaves the plan's value as it is.
+
+How the lookup works:
+
+- `kindeManagementApi()` needs an M2M app in Kinde that is authorized for the Kinde Management API with the `read:organizations` and `read:billing_entitlements` scopes. It gets its own token with the client credentials grant and reuses it until it expires.
+- For each organization it makes two calls: `GET /api/v1/organization?expand=billing`, which gives the plan code and the billing customer ID, and `GET /api/v1/billing/entitlements` for that customer, which gives the limits.
+- It only needs the organization code, so it works the same for user tokens and for AI agents with M2M tokens.
+- A lookup is reused for 60 seconds per caller (`entitlementsCacheMs`), and parallel calls share one request.
+- If Kinde cannot be reached, the last answer is used for up to an hour (`entitlementsMaxStaleMs`). After that, or with no earlier answer, the call is denied with `entitlements_unavailable` (503) rather than given a plan the organization may not pay for.
+
+For plans billed to individual users rather than organizations, use `kindeAccountApi({ issuer })` instead. It reads Kinde's Account API with the user's own access token, so pass `token` to `decide()` even if you also pass `claims`. Kinde's Account API returned an empty plan for an organization's subscription when this package was tested, which is why organization billing goes through the Management API.
+
+To read billing some other way, pass `entitlements: async ({ principal, token }) => ({ orgCode, plans: ["pro"], limits: { ai_monthly_usd: 250 } })`. Return `null` when you cannot answer for that caller.
 
 ## How a decision is made
 
@@ -139,11 +191,13 @@ Kinde sets the plan however you run billing. A common setup is a string feature 
 1. Verify the access token against your Kinde issuer's keys at `/.well-known/jwks.json`. Only RS256 tokens with your issuer and audience pass.
 2. Read the caller: a user (`sub`) or an M2M client (`azp`, when `gty` is `client_credentials`), with `org_code`, roles, permissions, feature flags and properties.
 3. Deny M2M tokens if the policy has no `agents` section, and tokens without `org_code` if an organization is required.
-4. Pick the plan.
-5. Apply every grant that matches.
-6. For an M2M caller, apply its agent policy.
-7. Choose the model: the one the request asks for if the plan allows it, otherwise the plan's default. Lower `maxOutputTokens` if the request asks for fewer.
-8. Read every budget that applies and deny if any is used up.
+4. Read Kinde billing, if the policy uses it.
+5. Pick the plan.
+6. Apply Kinde entitlements, then properties, to the plan's limits.
+7. Apply every grant that matches.
+8. For an M2M caller, apply its agent policy.
+9. Choose the model: the one the request asks for if the plan allows it, otherwise the plan's default. Lower `maxOutputTokens` if the request asks for fewer.
+10. Read every budget that applies and deny if any is used up.
 
 ```ts
 const { decision, steps } = await ai.explain({ token });
@@ -201,6 +255,7 @@ An agent gets the plan's models narrowed to its own `models`, the lower of the t
 | `model_not_allowed` | 403 | The request asks for a model the caller may not use |
 | `no_plan` | 402 | No plan source matched and there is no fallback plan |
 | `budget_exhausted` | 429 | A budget is used up, or the call's worst case does not fit in what is left |
+| `entitlements_unavailable` | 503 | Kinde billing could not be reached and there is no recent answer to use |
 
 `ai.toResponse(denied)` turns a denial into a JSON `Response` with that status, the reason and a readable message, plus a `Retry-After` header when the budget resets:
 
@@ -241,14 +296,15 @@ expect(await ai.decide({ token: outsider }, { model: "anthropic/claude-sonnet-4.
 
 From `kinde-ai-policy`:
 
-- `createAiPolicy({ policy, issuer, audience, jwks, verify, store, pricing, reservationTtlMs, estimateInputTokens, now })` returns the engine. `verify` replaces the built-in token check with your own.
-- `ai.decide({ token } | { claims }, { model, maxOutputTokens })` returns an `Allowed` decision (`plan`, `model`, `models`, `fallbacks`, `maxOutputTokens`, `budgets` with `remaining` and `resetsAt`, `attribution`) or a `Denied` one (`reason`, `status`, `detail`, `retryAt`).
+- `createAiPolicy({ policy, issuer, audience, jwks, verify, store, pricing, reservationTtlMs, entitlements, entitlementsCacheMs, entitlementsMaxStaleMs, estimateInputTokens, now })` returns the engine. `verify` replaces the built-in token check with your own, and `entitlements` is required when the policy reads Kinde billing.
+- `ai.decide({ token, claims }, { model, maxOutputTokens })` returns an `Allowed` decision (`plan`, `model`, `models`, `fallbacks`, `maxOutputTokens`, `budgets` with `remaining` and `resetsAt`, `attribution`) or a `Denied` one (`reason`, `status`, `detail`, `retryAt`).
 - `ai.explain(input, request)` returns `{ decision, steps }`.
 - `ai.prepare(decision, request, adapter)` reserves budget and returns `{ url, headers, body, model, fallbacks, maxOutputTokens, reservationId, settle(), release() }`, or a `Denied` decision when the call does not fit.
 - `ai.toResponse(denied)` returns a `Response`.
 - `definePolicy(policy)` checks and freezes a policy. `validatePolicy(policy)` returns the list of problems without throwing.
 - `principalFromClaims(claims)` turns verified claims into `{ type, subject, orgCode, roles, permissions, scopes, featureFlags, properties }`.
 - `createVerifier({ issuer, audience, jwks })` returns the token check on its own.
+- `kindeManagementApi({ issuer, clientId, clientSecret, audience, fetch, pageSize })` and `kindeAccountApi({ issuer, fetch, pageSize })` read Kinde billing. `KINDE_UNLIMITED` is `2147483647`.
 - `memoryStore()` and the `BudgetStore` interface.
 - `estimateInputTokens(request)`, `costMicros(price, input, output)` and `periodWindow(period, date)`.
 - `PolicyConfigError`, with `problems` listing each one.
@@ -260,14 +316,17 @@ From `kinde-ai-policy/openai-compatible`: `openaiCompatible({ baseUrl, apiKey, m
 | Feature | Status |
 | --- | --- |
 | Kinde access token verification with JWKS, user and M2M tokens | Implemented, tested against kinde-testkit's issuer over HTTP |
-| Plans from feature flags, properties and claims, with a fallback plan | Implemented |
+| Plans from Kinde billing, feature flags, properties and claims, with a fallback plan | Implemented |
 | Grants by permission, role and feature flag | Implemented |
 | Agent policies for M2M clients | Implemented |
 | Organization, user and agent budgets in USD and tokens, by day, week and month | Implemented |
 | Reserve before the call, settle after, release on failure | Implemented, tested with 50 parallel calls against one limit |
 | In-memory budget store | Implemented |
 | OpenAI-compatible adapter, including streams | Implemented, tested against a local OpenAI-compatible server |
-| Plans and limits from Kinde billing entitlements | Next release |
+| Plans and limits from Kinde billing for organizations, through the Management API | Implemented, checked against a real Kinde business and tested with the responses it returned |
+| Plans and limits from Kinde billing for users, through the Account API | Implemented, tested against kinde-testkit's Account API over HTTP |
+| Kinde billing for M2M agents | Implemented, through the Management API |
+| Limits from Kinde properties | Implemented |
 | OpenRouter, Vercel AI Gateway and AI SDK adapters with native fallbacks | Planned |
 | LiteLLM, Portkey and Cloudflare AI Gateway adapters | Planned |
 | Redis and Upstash budget stores | Planned |

@@ -7,6 +7,8 @@ export { memoryStore, type BudgetStore, type ReserveEntry, type ReserveResult } 
 export { costMicros, estimateInputTokens } from "./pricing.js";
 export { periodWindow } from "./periods.js";
 export { PolicyConfigError } from "./errors.js";
+export { kindeAccountApi, kindeManagementApi, EntitlementsError, KINDE_UNLIMITED } from "./entitlements.js";
+export type { Entitlements, EntitlementsContext, EntitlementsSource, KindeAccountApiOptions, KindeManagementApiOptions } from "./entitlements.js";
 export type { ChatRequest, GatewayAdapter, RenderInput, Rendered, Usage } from "./adapter.js";
 export type {
   AgentPolicy,
@@ -19,6 +21,7 @@ export type {
   Denied,
   DenialReason,
   Grant,
+  LimitTarget,
   Period,
   PlanPolicy,
   PlanSource,

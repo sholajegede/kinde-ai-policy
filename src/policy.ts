@@ -1,5 +1,5 @@
 import { PolicyConfigError } from "./errors.js";
-import type { AgentPolicy, AiPolicy, Budget, Grant, PlanPolicy, Pricing } from "./types.js";
+import type { AgentPolicy, AiPolicy, Budget, Grant, LimitTarget, PlanPolicy, Pricing } from "./types.js";
 
 const SCOPES = ["org", "user", "agent"];
 const PERIODS = ["day", "week", "month"];
@@ -55,6 +55,15 @@ function checkAgent(agent: unknown, at: string, problems: string[]) {
   checkBudgets(agent.budgets, at, ["agent"], problems);
 }
 
+export function isLimitTarget(target: unknown): target is LimitTarget {
+  return typeof target === "string" && (target === "maxOutputTokens" || /^budgets\.(org|user)\.(usd|tokens)\.(day|week|month)$/.test(target));
+}
+
+/** True when the policy reads Kinde billing entitlements. */
+export function policyUsesEntitlements(policy: AiPolicy): boolean {
+  return (policy.plan.from ?? []).some((s) => "billing" in s) || Object.keys(policy.entitlements ?? {}).length > 0;
+}
+
 /** Returns every problem with a policy. An empty list means the policy is valid. */
 export function validatePolicy(policy: unknown): string[] {
   const problems: string[] = [];
@@ -74,12 +83,25 @@ export function validatePolicy(policy: unknown): string[] {
         from.forEach((source, i) => {
           const keys = isObject(source) ? Object.keys(source) : [];
           const key = keys[0];
-          const ok = keys.length === 1 && key !== undefined && ["flag", "property", "claim"].includes(key) && typeof (source as Record<string, unknown>)[key] === "string";
-          if (!ok) problems.push(`plan.from[${i}] must be { flag }, { property } or { claim } with a string name`);
+          const value = key === undefined ? undefined : (source as Record<string, unknown>)[key];
+          const ok =
+            keys.length === 1 &&
+            ((key === "billing" && value === true) || (key !== undefined && ["flag", "property", "claim"].includes(key) && typeof value === "string" && value !== ""));
+          if (!ok) problems.push(`plan.from[${i}] must be { billing: true }, or { flag }, { property } or { claim } with a name`);
         });
     }
     if (fallback !== undefined && (typeof fallback !== "string" || (isObject(plans) && !(fallback in plans))))
       problems.push(`plan.fallback must name a plan in plans`);
+  }
+
+  for (const section of ["entitlements", "properties"] as const) {
+    const map = policy[section];
+    if (map === undefined) continue;
+    if (!isObject(map)) {
+      problems.push(`${section} must be an object of key to limit`);
+      continue;
+    }
+    for (const [key, target] of Object.entries(map)) if (!isLimitTarget(target)) problems.push(`${section}.${key} must be "maxOutputTokens" or "budgets.<org|user>.<usd|tokens>.<day|week|month>"`);
   }
 
   if (policy.grants !== undefined) {
@@ -130,12 +152,16 @@ function hasUsd(budgets: Budget[] | undefined) {
   return (budgets ?? []).some((b) => b.usd !== undefined);
 }
 
+const targetsUsd = (map: Record<string, LimitTarget> | undefined) => Object.values(map ?? {}).some((t) => t.includes(".usd."));
+
 /** True when any budget in the policy is in USD, which needs prices. */
 export function policyNeedsPricing(policy: AiPolicy): boolean {
   const agents: AgentPolicy[] = [policy.agents?.default, ...Object.values(policy.agents?.clients ?? {})].filter((a): a is AgentPolicy => a !== undefined);
   return (
     Object.values(policy.plans).some((p: PlanPolicy) => hasUsd(p.budgets)) ||
     (policy.grants ?? []).some((g: Grant) => hasUsd(g.budgets)) ||
+    targetsUsd(policy.entitlements) ||
+    targetsUsd(policy.properties) ||
     agents.some((a) => hasUsd(a.budgets))
   );
 }

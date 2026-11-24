@@ -20,7 +20,14 @@ export interface PlanPolicy {
   budgets?: Budget[];
 }
 
-export type PlanSource = { flag: string } | { property: string } | { claim: string };
+/** `{ billing: true }` reads the plan the caller subscribes to in Kinde billing. */
+export type PlanSource = { billing: true } | { flag: string } | { property: string } | { claim: string };
+
+/**
+ * Where a Kinde entitlement or property value goes: `maxOutputTokens`, or a budget
+ * written as `budgets.<scope>.<unit>.<period>`, for example `budgets.org.usd.month`.
+ */
+export type LimitTarget = "maxOutputTokens" | `budgets.${"org" | "user"}.${Unit}.${Period}`;
 
 /** Extra access for callers with a permission, role or feature flag. */
 export interface Grant {
@@ -44,6 +51,10 @@ export interface AgentPolicy {
 export interface AiPolicy {
   plan: { from?: PlanSource[]; fallback?: string };
   plans: Record<string, PlanPolicy>;
+  /** Kinde billing feature keys whose `entitlement_limit_max` replaces a plan limit. */
+  entitlements?: Record<string, LimitTarget>;
+  /** Kinde organization, user or application property keys whose number replaces a plan limit. */
+  properties?: Record<string, LimitTarget>;
   grants?: Grant[];
   /** Policy for M2M tokens. Without it, M2M tokens are refused. */
   agents?: { default?: AgentPolicy; clients?: Record<string, AgentPolicy> };
@@ -104,12 +115,13 @@ export type DenialReason =
   | "agent_not_allowed"
   | "no_plan"
   | "model_not_allowed"
-  | "budget_exhausted";
+  | "budget_exhausted"
+  | "entitlements_unavailable";
 
 export interface Denied {
   allowed: false;
   reason: DenialReason;
-  status: 401 | 402 | 403 | 429;
+  status: 401 | 402 | 403 | 429 | 503;
   detail: string;
   retryAt?: string;
 }

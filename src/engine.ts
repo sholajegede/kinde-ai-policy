@@ -2,11 +2,12 @@ import type { JSONWebKeySet } from "jose";
 import type { ChatRequest, GatewayAdapter, Rendered, Usage } from "./adapter.js";
 import { PolicyConfigError } from "./errors.js";
 import { periodWindow } from "./periods.js";
-import { definePolicy, policyModels, policyNeedsPricing, validatePricing } from "./policy.js";
+import { cachedEntitlements, KINDE_UNLIMITED, type Entitlements, type EntitlementsSource } from "./entitlements.js";
+import { definePolicy, policyModels, policyNeedsPricing, policyUsesEntitlements, validatePricing } from "./policy.js";
 import { costMicros, estimateInputTokens, worstCaseMicros } from "./pricing.js";
 import { principalFromClaims } from "./principal.js";
 import { memoryStore, type BudgetStore } from "./store.js";
-import type { AgentPolicy, AiPolicy, Allowed, Budget, BudgetLimit, Decision, Denied, DenialReason, Period, Pricing, Principal, Scope, Unit } from "./types.js";
+import type { AgentPolicy, AiPolicy, Allowed, Budget, BudgetLimit, Decision, Denied, DenialReason, LimitTarget, Period, Pricing, Principal, Scope, Unit } from "./types.js";
 import { createVerifier, type TokenVerifier } from "./verify.js";
 
 export interface AiPolicyOptions {
@@ -24,6 +25,12 @@ export interface AiPolicyOptions {
   pricing?: Pricing;
   /** How long an unsettled reservation holds budget. Defaults to 10 minutes. */
   reservationTtlMs?: number;
+  /** Reads the caller's Kinde billing plan and limits: kindeManagementApi() or kindeAccountApi(). Required when the policy reads billing. */
+  entitlements?: EntitlementsSource;
+  /** How long a billing lookup is reused. Defaults to 60 seconds. */
+  entitlementsCacheMs?: number;
+  /** How long the last lookup is still used while Kinde cannot be reached. Defaults to 1 hour. */
+  entitlementsMaxStaleMs?: number;
   estimateInputTokens?: (request: ChatRequest) => number;
   now?: () => Date;
 }
@@ -31,7 +38,7 @@ export interface AiPolicyOptions {
 export interface DecideInput {
   /** A Kinde access token. It is verified before use. */
   token?: string | null;
-  /** Claims your framework already verified. */
+  /** Claims your framework already verified. Pass the token too when the policy reads Kinde billing. */
   claims?: Record<string, unknown>;
 }
 
@@ -81,6 +88,7 @@ const STATUS: Record<DenialReason, Denied["status"]> = {
   model_not_allowed: 403,
   no_plan: 402,
   budget_exhausted: 429,
+  entitlements_unavailable: 503,
 };
 
 const PERIOD_WORD: Record<Period, string> = { day: "daily", week: "weekly", month: "monthly" };
@@ -120,6 +128,9 @@ export function createAiPolicy(options: AiPolicyOptions): AiPolicyEngine {
     else problems.push(...validatePricing(options.pricing, policyModels(policy)));
   } else if (options.pricing) problems.push(...validatePricing(options.pricing, []));
   if (options.reservationTtlMs !== undefined && !(options.reservationTtlMs > 0)) problems.push("reservationTtlMs must be positive");
+  const usesEntitlements = policyUsesEntitlements(policy);
+  if (usesEntitlements && !options.entitlements)
+    problems.push("the policy reads Kinde billing, so pass entitlements: kindeManagementApi({ issuer, clientId, clientSecret }) for organization plans, or kindeAccountApi({ issuer }) for user plans");
   if (problems.length > 0) throw new PolicyConfigError(problems);
 
   const verify =
@@ -132,6 +143,14 @@ export function createAiPolicy(options: AiPolicyOptions): AiPolicyEngine {
   const now = options.now ?? (() => new Date());
   const ttl = options.reservationTtlMs ?? 600_000;
   const estimate = options.estimateInputTokens ?? estimateInputTokens;
+  const entitlementSource = options.entitlements;
+  const lookup = entitlementSource
+    ? cachedEntitlements(entitlementSource, {
+        ttlMs: options.entitlementsCacheMs ?? 60_000,
+        maxStaleMs: options.entitlementsMaxStaleMs ?? 3_600_000,
+        now: () => now().getTime(),
+      })
+    : undefined;
 
   const deny = (reason: DenialReason, detail: string, retryAt?: string): Denied => ({
     allowed: false,
@@ -160,8 +179,17 @@ export function createAiPolicy(options: AiPolicyOptions): AiPolicyEngine {
     }
   }
 
-  function pickPlan(principal: Principal, steps: string[]): string | undefined {
+  function pickPlan(principal: Principal, billing: Entitlements | null, steps: string[]): string | undefined {
     for (const source of policy.plan.from ?? []) {
+      if ("billing" in source) {
+        const plan = billing?.plans.find((k) => Object.hasOwn(policy.plans, k));
+        if (plan) {
+          steps.push(`Plan "${plan}" comes from Kinde billing.`);
+          return plan;
+        }
+        if (billing && billing.plans.length > 0) steps.push(`Skipped Kinde billing: ${billing.plans.map((p) => `"${p}"`).join(", ")} is not a plan in the policy.`);
+        continue;
+      }
       const [label, value] =
         "flag" in source
           ? [`feature flag "${source.flag}"`, principal.featureFlags[source.flag]]
@@ -192,13 +220,56 @@ export function createAiPolicy(options: AiPolicyOptions): AiPolicyEngine {
     if (principal.type === "machine" && !policy.agents) return done(deny("agent_not_allowed", "This policy does not allow M2M tokens. Add an agents section to allow them."));
     if (!principal.orgCode && policy.requireOrganization !== false) return done(deny("no_organization", "The token has no org_code, and the policy requires an organization."));
 
-    const plan = pickPlan(principal, steps);
+    let billing: Entitlements | null = null;
+    if (lookup) {
+      try {
+        const result = await lookup({ principal, ...(input.token ? { token: input.token } : {}) });
+        billing = result.value;
+        if (result.stale) steps.push(`Kinde billing could not be reached (${result.error?.message}), so its last answer applies.`);
+        else if (billing) steps.push(`Read Kinde billing: ${billing.plans.length > 0 ? `plan ${billing.plans.join(", ")}` : "no plan"}, ${Object.keys(billing.limits).length} entitlements.`);
+        else steps.push("Kinde billing was not read for this caller.");
+      } catch (error) {
+        return done(deny("entitlements_unavailable", `Kinde billing could not be reached: ${(error as Error).message}`));
+      }
+    }
+
+    const plan = pickPlan(principal, billing, steps);
     if (!plan) return done(deny("no_plan", "No plan applies to this caller."));
     const planPolicy = policy.plans[plan]!;
 
     const models = [...planPolicy.models];
     let maxOutputTokens = planPolicy.maxOutputTokens;
     let budgets = flatten(planPolicy.budgets);
+
+    const setLimit = (target: LimitTarget, value: number, label: string) => {
+      if (target === "maxOutputTokens") {
+        if (value === KINDE_UNLIMITED) return void steps.push(`${label} is unlimited, so the plan's output limit stays.`);
+        if (!Number.isInteger(value) || value <= 0) return void steps.push(`Skipped ${label}: ${value} is not a valid output limit.`);
+        maxOutputTokens = value;
+        return void steps.push(`${label} sets maxOutputTokens to ${value}.`);
+      }
+      const [, scope, unit, period] = target.split(".") as [string, Scope, Unit, Period];
+      const same = (b: FlatBudget) => b.scope === scope && b.unit === unit && b.period === period;
+      if (value === KINDE_UNLIMITED) {
+        budgets = budgets.filter((b) => !same(b));
+        return void steps.push(`${label} is unlimited, so the ${PERIOD_WORD[period]} ${scope} ${unit} budget is removed.`);
+      }
+      if (!Number.isFinite(value) || value < 0) return void steps.push(`Skipped ${label}: ${value} is not a valid budget.`);
+      budgets = replace(budgets, [{ scope, unit, period, amount: unit === "tokens" ? Math.floor(value) : value }]);
+      steps.push(`${label} sets the ${PERIOD_WORD[period]} ${scope} budget to ${format(unit, value)}.`);
+    };
+
+    for (const [feature, target] of Object.entries(policy.entitlements ?? {})) {
+      if (!billing || !Object.hasOwn(billing.limits, feature)) continue;
+      const max = billing.limits[feature];
+      if (max === null || max === undefined) steps.push(`Kinde entitlement "${feature}" has no limit, so the plan's value stays.`);
+      else setLimit(target, max, `Kinde entitlement "${feature}"`);
+    }
+    for (const [key, target] of Object.entries(policy.properties ?? {})) {
+      const raw = principal.properties[key];
+      if (raw === undefined || raw === null || raw === "") continue;
+      setLimit(target, typeof raw === "number" ? raw : Number(raw), `Property "${key}"`);
+    }
 
     (policy.grants ?? []).forEach((grant, i) => {
       const [label, applies] = grant.permission

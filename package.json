@@ -1,6 +1,6 @@
 {
   "name": "kinde-ai-policy",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Decide which AI models, output limits and budgets each Kinde user, organization or agent gets, from their Kinde plan and billing entitlements, and hand the decision to your AI gateway. Reserves budget before the call and settles it after.",
   "type": "module",
   "license": "MIT",
@@ -27,7 +27,9 @@
     "m2m",
     "openai",
     "openrouter",
-    "litellm"
+    "litellm",
+    "vercel-ai-gateway",
+    "ai-sdk"
   ],
   "engines": {
     "node": ">=20"
@@ -59,6 +61,36 @@
         "default": "./dist/openai-compatible.cjs"
       }
     },
+    "./openrouter": {
+      "import": {
+        "types": "./dist/openrouter.d.ts",
+        "default": "./dist/openrouter.js"
+      },
+      "require": {
+        "types": "./dist/openrouter.d.cts",
+        "default": "./dist/openrouter.cjs"
+      }
+    },
+    "./vercel": {
+      "import": {
+        "types": "./dist/vercel.d.ts",
+        "default": "./dist/vercel.js"
+      },
+      "require": {
+        "types": "./dist/vercel.d.cts",
+        "default": "./dist/vercel.cjs"
+      }
+    },
+    "./ai-sdk": {
+      "import": {
+        "types": "./dist/ai-sdk.d.ts",
+        "default": "./dist/ai-sdk.js"
+      },
+      "require": {
+        "types": "./dist/ai-sdk.d.cts",
+        "default": "./dist/ai-sdk.cjs"
+      }
+    },
     "./package.json": "./package.json"
   },
   "main": "./dist/index.cjs",
@@ -68,9 +100,10 @@
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --exclude 'test/contract/**'",
+    "test": "vitest run --exclude 'test/contract/**' --exclude 'test/live/**'",
     "test:contract": "vitest run test/contract",
-    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+    "prepublishOnly": "npm run typecheck && npm test && npm run build",
+    "test:live": "vitest run test/live"
   },
   "dependencies": {
     "jose": "^6.2.17"
@@ -80,6 +113,15 @@
     "kinde-testkit": "^0.8.0",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
-    "vitest": "^5.1.1"
+    "vitest": "^5.1.1",
+    "ai": "^7.0.181"
+  },
+  "peerDependencies": {
+    "ai": ">=6"
+  },
+  "peerDependenciesMeta": {
+    "ai": {
+      "optional": true
+    }
   }
 }

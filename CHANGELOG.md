@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0
+
+- Add `kinde-ai-policy/openrouter`. It sends the decision's fallbacks in OpenRouter's `models` field, turns on usage accounting so `settle()` charges the cost OpenRouter reports, and can send app attribution headers.
+- Add `kinde-ai-policy/vercel` for Vercel AI Gateway. It sends fallbacks in `providerOptions.gateway`, keeps the caller's own gateway options, and settles the total Vercel debited (`gatewayCost`) and the model it routed to. The user and reporting tags are opt-in with `sendUser` and `sendTags`, because Vercel charges for each reporting value.
+- Add `kinde-ai-policy/ai-sdk`, language model middleware for the AI SDK. It refuses a model the decision does not allow, caps `maxOutputTokens`, reserves budget, and settles from the call's usage for `generateText` and `streamText`, or returns the reservation if the call fails. Refusals throw `PolicyDeniedError`. With `gateway: "vercel"` it sends the fallbacks, and the user and tags when asked. It supports AI SDK 7, and AI SDK 6 with `specificationVersion: "v3"`.
+- Add `ai.reserve()`, which reserves budget for a call you make yourself. `prepare()` and the middleware are built on it.
+- A cost the gateway reports is now rounded up to the next millionth of a dollar, not to the nearest, so small calls are never undercharged.
+- `readOpenAIUsage()` also reads Vercel AI Gateway's metadata on the message.
+- Live tests in `npm run test:live` call OpenRouter and Vercel AI Gateway with keys from `.env.local`.
+
 ## 0.2.0
 
 - Read the caller's plan and limits from Kinde billing. `plan.from` accepts `{ billing: true }`, and the new `entitlements` section maps a Kinde feature code to `maxOutputTokens` or a budget, such as `budgets.org.usd.month`.

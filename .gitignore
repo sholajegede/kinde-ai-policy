@@ -3,7 +3,7 @@ dist
 *.tgz
 *.tsbuildinfo
 .DS_Store
-.env
+.env*
 BUILD_PLAN.md
 BUILD_LOG.md
 CLAUDE.md

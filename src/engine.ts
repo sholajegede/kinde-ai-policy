@@ -61,22 +61,37 @@ export interface Settlement {
   charged: "actual" | "reserved";
 }
 
-export interface Prepared extends Rendered {
+export interface ReserveCall {
+  /** Defaults to the decision's model. It must be one the decision allows. */
+  model?: string;
+  inputTokens: number;
+  /** Capped at the decision's limit. Defaults to it. */
+  maxOutputTokens?: number;
+}
+
+export interface Reservation {
   allowed: true;
   reservationId: string;
   model: string;
   fallbacks: string[];
   maxOutputTokens: number;
-  /** Charges what the call used. Pass the gateway's response, its last streamed chunk, or a Usage object. */
-  settle(result?: unknown): Promise<Settlement>;
+  /** Charges what the call used. Without usage, the whole reservation is charged. */
+  settle(usage?: Usage | null): Promise<Settlement>;
   /** Returns the whole reservation, for a call that failed or was never sent. */
   release(): Promise<void>;
+}
+
+export interface Prepared extends Rendered, Omit<Reservation, "settle"> {
+  /** Charges what the call used. Pass the gateway's response, its last streamed chunk, or a Usage object. */
+  settle(result?: unknown): Promise<Settlement>;
 }
 
 export interface AiPolicyEngine {
   readonly policy: AiPolicy;
   decide(input: DecideInput, request?: DecideRequest): Promise<Decision>;
   explain(input: DecideInput, request?: DecideRequest): Promise<Explanation>;
+  /** Reserves budget for one model call you make yourself. prepare() and the AI SDK middleware use it. */
+  reserve(decision: Decision, call: ReserveCall): Promise<Reservation | Denied>;
   prepare(decision: Decision, request: ChatRequest, adapter: GatewayAdapter): Promise<Prepared | Denied>;
   toResponse(denied: Denied): Response;
 }
@@ -357,16 +372,16 @@ export function createAiPolicy(options: AiPolicyOptions): AiPolicyEngine {
     });
   }
 
-  async function prepare(decision: Decision, request: ChatRequest, adapter: GatewayAdapter): Promise<Prepared | Denied> {
+  async function reserve(decision: Decision, call: ReserveCall): Promise<Reservation | Denied> {
     if (!decision.allowed) return decision;
-    const model = request.model ?? decision.model;
+    const model = call.model ?? decision.model;
     if (!decision.models.includes(model))
       return deny("model_not_allowed", `${model} is not allowed on plan "${decision.plan}". Allowed: ${decision.models.join(", ")}.`);
-    const usableFallbacks = decision.fallbacks.filter((f) => f !== model);
-    const asked = request.max_tokens ?? request.max_completion_tokens;
+    const fallbacks = decision.fallbacks.filter((f) => f !== model);
+    const asked = call.maxOutputTokens;
     const maxOutputTokens = typeof asked === "number" && asked > 0 ? Math.min(asked, decision.maxOutputTokens) : decision.maxOutputTokens;
-    const inputTokens = estimate(request);
-    const chain = [model, ...usableFallbacks];
+    const inputTokens = Math.max(0, Math.ceil(call.inputTokens));
+    const chain = [model, ...fallbacks];
     const usdMicros = worstCaseMicros(pricing, chain, inputTokens, maxOutputTokens);
 
     const amounts = new Map<string, number>();
@@ -388,15 +403,12 @@ export function createAiPolicy(options: AiPolicyOptions): AiPolicyEngine {
       );
     }
 
-    const rendered = adapter.render({ decision, request, model, fallbacks: usableFallbacks, maxOutputTokens });
     let finished: Promise<Settlement> | undefined;
     let released = false;
-
-    const settle = (result?: unknown): Promise<Settlement> => {
+    const settle = (usage?: Usage | null): Promise<Settlement> => {
       if (finished) return finished;
       if (released) return Promise.reject(new Error("This reservation was released, so it cannot be settled."));
       finished = (async () => {
-        const usage = isUsage(result) ? result : result === undefined ? null : adapter.readUsage(result);
         if (!usage) {
           await store.settle(reservationId, {});
           return { model, inputTokens: null, outputTokens: null, costUsd: decision.budgets.some((b) => b.unit === "usd") ? usdMicros / 1e6 : null, charged: "reserved" };
@@ -405,7 +417,7 @@ export function createAiPolicy(options: AiPolicyOptions): AiPolicyEngine {
         const price = pricing[used];
         const micros =
           usage.costUsd !== undefined
-            ? Math.round(usage.costUsd * 1_000_000)
+            ? Math.ceil(usage.costUsd * 1_000_000 - 1e-6)
             : price
               ? costMicros(price, usage.inputTokens, usage.outputTokens)
               : worstCaseMicros(pricing, chain, usage.inputTokens, usage.outputTokens);
@@ -422,9 +434,8 @@ export function createAiPolicy(options: AiPolicyOptions): AiPolicyEngine {
       allowed: true,
       reservationId,
       model,
-      fallbacks: usableFallbacks,
+      fallbacks,
       maxOutputTokens,
-      ...rendered,
       settle,
       async release() {
         if (finished || released) return;
@@ -434,12 +445,29 @@ export function createAiPolicy(options: AiPolicyOptions): AiPolicyEngine {
     };
   }
 
+  async function prepare(decision: Decision, request: ChatRequest, adapter: GatewayAdapter): Promise<Prepared | Denied> {
+    if (!decision.allowed) return decision;
+    const reservation = await reserve(decision, {
+      ...(request.model !== undefined ? { model: request.model } : {}),
+      inputTokens: estimate(request),
+      ...(typeof (request.max_tokens ?? request.max_completion_tokens) === "number" ? { maxOutputTokens: (request.max_tokens ?? request.max_completion_tokens)! } : {}),
+    });
+    if (!reservation.allowed) return reservation;
+    const rendered = adapter.render({ decision, request, model: reservation.model, fallbacks: reservation.fallbacks, maxOutputTokens: reservation.maxOutputTokens });
+    return {
+      ...reservation,
+      ...rendered,
+      settle: (result?: unknown) => reservation.settle(isUsage(result) ? result : result === undefined ? null : adapter.readUsage(result)),
+    };
+  }
+
   return {
     policy,
     async decide(input, request) {
       return (await resolve(input, request)).decision;
     },
     explain: resolve,
+    reserve,
     prepare,
     toResponse(denied) {
       const headers: Record<string, string> = { "content-type": "application/json" };

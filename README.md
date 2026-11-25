@@ -74,11 +74,11 @@ export const policy = definePolicy({
 });
 ```
 
-Then use it in any route that calls a model. This one forwards to an OpenAI-compatible endpoint:
+Then use it in any route that calls a model. This one sends the call to OpenRouter:
 
 ```ts
 import { createAiPolicy } from "kinde-ai-policy";
-import { openaiCompatible } from "kinde-ai-policy/openai-compatible";
+import { openrouter } from "kinde-ai-policy/openrouter";
 import { policy } from "./ai-policy";
 
 const ai = createAiPolicy({
@@ -92,7 +92,7 @@ const ai = createAiPolicy({
   },
 });
 
-const gateway = openaiCompatible({ baseUrl: "https://openrouter.ai/api/v1", apiKey: process.env.OPENROUTER_API_KEY });
+const gateway = openrouter({ apiKey: process.env.OPENROUTER_API_KEY });
 
 export async function POST(req: Request) {
   const token = req.headers.get("authorization")?.replace(/^Bearer /, "");
@@ -265,11 +265,78 @@ An agent gets the plan's models narrowed to its own `models`, the lower of the t
 
 ## Gateways
 
-An adapter turns a decision into one gateway's request and reads usage back from its response.
+An adapter turns a decision into one gateway's request and reads usage and cost back from its response. Each one is its own import, so you only load the one you use.
 
-`kinde-ai-policy/openai-compatible` works with any endpoint that speaks the OpenAI chat completions API, which includes OpenAI, OpenRouter, LiteLLM, Vercel AI Gateway, Portkey and Cloudflare AI Gateway. It sets `model`, caps `max_tokens` (or `max_completion_tokens` with `maxTokensField`), puts the user or agent ID in `user`, and asks streams to include usage in their last chunk. That API has no field for fallbacks, so this adapter does not send them. Adapters that use each gateway's own fields for fallbacks, providers and attribution come in the next releases.
+### OpenRouter
 
-To use another gateway now, implement `GatewayAdapter`: a `render()` that returns `{ url, headers, body }` and a `readUsage()` that returns `{ inputTokens, outputTokens, model, costUsd }`.
+```ts
+import { openrouter } from "kinde-ai-policy/openrouter";
+
+const call = await ai.prepare(decision, { messages }, openrouter({ apiKey: process.env.OPENROUTER_API_KEY }));
+```
+
+The adapter sends the decision's fallbacks in OpenRouter's `models` field, which OpenRouter tries in order after `model`. It caps `max_tokens`, sends the user or agent ID in `user`, and turns on usage accounting, so `settle()` charges the cost OpenRouter reports in `usage.cost`. Pass `app: { url, title }` to send the `HTTP-Referer` and `X-Title` headers OpenRouter uses for app attribution.
+
+OpenRouter checks every model ID in the request before it routes, so a misspelled model in a plan or its fallbacks fails the whole request with a 400, not just that model. Use exact OpenRouter model IDs in your policy.
+
+### Vercel AI Gateway
+
+```ts
+import { vercelGateway } from "kinde-ai-policy/vercel";
+
+const call = await ai.prepare(decision, { messages }, vercelGateway({ apiKey: process.env.AI_GATEWAY_API_KEY }));
+```
+
+The adapter sends the fallbacks in `providerOptions.gateway`, and keeps any gateway options you already set there, such as `order`. When Vercel falls back, it still answers with a normal response, and `settle()` reads the model that answered and the total Vercel debited (`gatewayCost`, surcharges included) from the response's metadata.
+
+`sendUser: true` sends the user or agent ID as Vercel's `user`, and `sendTags: true` adds `plan:`, `org:` and `agent:` reporting tags, so Vercel's spend reports can group by them. Both are off by default because Vercel charges for each reporting value it records. In testing, each value added $0.000075 to the request, more than 20 times the inference cost of a short call.
+
+Vercel's own budgets cover API keys, projects and team members, not the customers of your app. The budgets in your policy are what limit each organization, user and agent.
+
+### The AI SDK
+
+```ts
+import { generateText, gateway, wrapLanguageModel } from "ai";
+import { aiPolicyMiddleware, PolicyDeniedError } from "kinde-ai-policy/ai-sdk";
+
+const decision = await ai.decide({ token });
+if (!decision.allowed) return ai.toResponse(decision);
+
+try {
+  const { text } = await generateText({
+    model: wrapLanguageModel({ model: gateway(decision.model), middleware: aiPolicyMiddleware(ai, decision, { gateway: "vercel" }) }),
+    prompt,
+  });
+  return Response.json({ text });
+} catch (error) {
+  if (error instanceof PolicyDeniedError) return ai.toResponse(error.denied);
+  throw error;
+}
+```
+
+The middleware works with `generateText` and `streamText`, and with any provider. Before the call it refuses a model the decision does not allow, caps `maxOutputTokens` and reserves budget. After the call, or when a stream finishes, it settles from the usage the call reports, and if the call fails it returns the reservation. With `gateway: "vercel"` it also sends the fallbacks in `providerOptions.gateway`, and `user: true` and `tags: true` add the paid reporting values described above. It defaults to AI SDK 7. Pass `specificationVersion: "v3"` for AI SDK 6.
+
+### Any OpenAI-compatible endpoint
+
+`kinde-ai-policy/openai-compatible` works with any endpoint that speaks the OpenAI chat completions API, such as OpenAI itself or a LiteLLM proxy. It sets `model`, caps `max_tokens` (or `max_completion_tokens` with `maxTokensField`), sends the user in `user`, and asks streams to include usage in their last chunk. That API has no fallback field, so this adapter sends no fallbacks.
+
+### Your own calls
+
+For a client or gateway with no adapter, reserve budget yourself and settle with the usage you get back:
+
+```ts
+const reservation = await ai.reserve(decision, { inputTokens: 1200, maxOutputTokens: 500 });
+if (!reservation.allowed) return ai.toResponse(reservation);
+try {
+  const result = await callYourModel(reservation.model, reservation.maxOutputTokens);
+  await reservation.settle({ inputTokens: result.inputTokens, outputTokens: result.outputTokens });
+} catch (error) {
+  await reservation.release();
+  throw error;
+}
+```
+
+To write an adapter, implement `GatewayAdapter`: a `render()` that returns `{ url, headers, body }` and a `readUsage()` that returns `{ inputTokens, outputTokens, model, costUsd }`. `chatCompletionsAdapter()` builds the OpenAI-style body for you.
 
 ## Test your policy with kinde-testkit
 
@@ -300,6 +367,7 @@ From `kinde-ai-policy`:
 - `ai.decide({ token, claims }, { model, maxOutputTokens })` returns an `Allowed` decision (`plan`, `model`, `models`, `fallbacks`, `maxOutputTokens`, `budgets` with `remaining` and `resetsAt`, `attribution`) or a `Denied` one (`reason`, `status`, `detail`, `retryAt`).
 - `ai.explain(input, request)` returns `{ decision, steps }`.
 - `ai.prepare(decision, request, adapter)` reserves budget and returns `{ url, headers, body, model, fallbacks, maxOutputTokens, reservationId, settle(), release() }`, or a `Denied` decision when the call does not fit.
+- `ai.reserve(decision, { model, inputTokens, maxOutputTokens })` reserves budget for a call you make yourself and returns `{ model, fallbacks, maxOutputTokens, settle(usage), release() }`, or a `Denied` decision.
 - `ai.toResponse(denied)` returns a `Response`.
 - `definePolicy(policy)` checks and freezes a policy. `validatePolicy(policy)` returns the list of problems without throwing.
 - `principalFromClaims(claims)` turns verified claims into `{ type, subject, orgCode, roles, permissions, scopes, featureFlags, properties }`.
@@ -309,7 +377,12 @@ From `kinde-ai-policy`:
 - `estimateInputTokens(request)`, `costMicros(price, input, output)` and `periodWindow(period, date)`.
 - `PolicyConfigError`, with `problems` listing each one.
 
-From `kinde-ai-policy/openai-compatible`: `openaiCompatible({ baseUrl, apiKey, maxTokensField, sendUser, headers })` and `readOpenAIUsage(response)`.
+From the gateway imports:
+
+- `kinde-ai-policy/openrouter`: `openrouter({ apiKey, baseUrl, app, maxTokensField, sendUser, headers })`.
+- `kinde-ai-policy/vercel`: `vercelGateway({ apiKey, baseUrl, sendTags, maxTokensField, sendUser, headers })`.
+- `kinde-ai-policy/ai-sdk`: `aiPolicyMiddleware(ai, decision, { gateway, user, tags, specificationVersion })`, `PolicyDeniedError` and `usageFromAiSdk()`.
+- `kinde-ai-policy/openai-compatible`: `openaiCompatible({ baseUrl, apiKey, maxTokensField, sendUser, headers })` and `readOpenAIUsage(response)`.
 
 ## What this release covers
 
@@ -323,11 +396,14 @@ From `kinde-ai-policy/openai-compatible`: `openaiCompatible({ baseUrl, apiKey, m
 | Reserve before the call, settle after, release on failure | Implemented, tested with 50 parallel calls against one limit |
 | In-memory budget store | Implemented |
 | OpenAI-compatible adapter, including streams | Implemented, tested against a local OpenAI-compatible server |
+| `ai.reserve()` for calls you make yourself | Implemented |
 | Plans and limits from Kinde billing for organizations, through the Management API | Implemented, checked against a real Kinde business and tested with the responses it returned |
 | Plans and limits from Kinde billing for users, through the Account API | Implemented, tested against kinde-testkit's Account API over HTTP |
 | Kinde billing for M2M agents | Implemented, through the Management API |
 | Limits from Kinde properties | Implemented |
-| OpenRouter, Vercel AI Gateway and AI SDK adapters with native fallbacks | Planned |
+| OpenRouter adapter with native fallbacks and reported cost | Implemented, tested live against OpenRouter |
+| Vercel AI Gateway adapter with native fallbacks and total debited cost | Implemented, tested live, including a fallback from a missing model |
+| AI SDK middleware for `generateText` and `streamText` | Implemented, tested with AI SDK 7 and live through Vercel AI Gateway |
 | LiteLLM, Portkey and Cloudflare AI Gateway adapters | Planned |
 | Redis and Upstash budget stores | Planned |
 | An agent acting for a user | Planned |

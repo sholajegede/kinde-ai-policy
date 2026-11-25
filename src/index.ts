@@ -1,5 +1,5 @@
 export { createAiPolicy } from "./engine.js";
-export type { AiPolicyEngine, AiPolicyOptions, DecideInput, DecideRequest, Explanation, Prepared, Settlement } from "./engine.js";
+export type { AiPolicyEngine, AiPolicyOptions, DecideInput, DecideRequest, Explanation, Prepared, Reservation, ReserveCall, Settlement } from "./engine.js";
 export { definePolicy, validatePolicy } from "./policy.js";
 export { principalFromClaims } from "./principal.js";
 export { createVerifier, type TokenVerifier, type VerifierOptions } from "./verify.js";
@@ -10,6 +10,7 @@ export { PolicyConfigError } from "./errors.js";
 export { kindeAccountApi, kindeManagementApi, EntitlementsError, KINDE_UNLIMITED } from "./entitlements.js";
 export type { Entitlements, EntitlementsContext, EntitlementsSource, KindeAccountApiOptions, KindeManagementApiOptions } from "./entitlements.js";
 export type { ChatRequest, GatewayAdapter, RenderInput, Rendered, Usage } from "./adapter.js";
+export { chatCompletionsAdapter, readOpenAIUsage, type ChatCompletionsOptions } from "./chat-completions.js";
 export type {
   AgentPolicy,
   AiPolicy,

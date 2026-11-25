@@ -80,3 +80,48 @@ describe("readOpenAIUsage", () => {
     expect(readOpenAIUsage(response)).toEqual({ model: "openai/gpt-4o-mini", inputTokens: 14, outputTokens: 2, costUsd: 0.0002283 });
   });
 });
+
+describe("litellm adapter", () => {
+  it("sends fallbacks, the user and tags, and reads the cost header", async () => {
+    const { litellm } = await import("../src/litellm.js");
+    const { ai, decision } = await proDecision();
+    const adapter = litellm({ baseUrl: "http://localhost:4000/", apiKey: "sk-master" });
+    const call = await ai.prepare(decision, ask, adapter);
+    if (!call.allowed) throw new Error(call.detail);
+    expect(call.url).toBe("http://localhost:4000/chat/completions");
+    expect(call.body).toEqual({ messages: ask.messages, model: SONNET, max_tokens: 8192, fallbacks: [MINI], user: "kp_alice", metadata: { tags: ["plan:pro", "org:org_acme"] } });
+    const usage = adapter.readUsage({ model: SONNET, usage: { prompt_tokens: 3, completion_tokens: 4 } }, new Headers({ "x-litellm-response-cost": "0.0042" }));
+    expect(usage).toEqual({ model: SONNET, inputTokens: 3, outputTokens: 4, costUsd: 0.0042 });
+  });
+});
+
+describe("portkey adapter", () => {
+  it("sends the model and its fallbacks as a fallback config, one target per model, with metadata", async () => {
+    const { portkey } = await import("../src/portkey.js");
+    const { ai, decision } = await proDecision();
+    const call = await ai.prepare(decision, ask, portkey({ apiKey: "pk-test", target: () => ({ provider: "@openrouter-prod", override_params: { temperature: 0 } }), onStatusCodes: [429, 500] }));
+    if (!call.allowed) throw new Error(call.detail);
+    expect(call.url).toBe("https://api.portkey.ai/v1/chat/completions");
+    expect(call.headers["x-portkey-api-key"]).toBe("pk-test");
+    expect(JSON.parse(call.headers["x-portkey-config"]!)).toEqual({
+      strategy: { mode: "fallback", on_status_codes: [429, 500] },
+      targets: [
+        { provider: "@openrouter-prod", override_params: { temperature: 0, model: SONNET } },
+        { provider: "@openrouter-prod", override_params: { temperature: 0, model: MINI } },
+      ],
+    });
+    expect(JSON.parse(call.headers["x-portkey-metadata"]!)).toEqual({ _user: "kp_alice", plan: "pro", org: "org_acme" });
+  });
+
+  it("sends a single target without a strategy, and no config without a target function", async () => {
+    const { portkey } = await import("../src/portkey.js");
+    const { ai, decision } = await proDecision();
+    const single = await ai.prepare(decision, { ...ask, model: MINI }, portkey({ target: () => ({ provider: "openai" }) }));
+    if (!single.allowed) throw new Error(single.detail);
+    expect(JSON.parse(single.headers["x-portkey-config"]!)).toEqual({ provider: "openai", override_params: { model: MINI } });
+    const bare = await ai.prepare(decision, ask, portkey({ sendMetadata: false }));
+    if (!bare.allowed) throw new Error(bare.detail);
+    expect(bare.headers).not.toHaveProperty("x-portkey-config");
+    expect(bare.headers).not.toHaveProperty("x-portkey-metadata");
+  });
+});

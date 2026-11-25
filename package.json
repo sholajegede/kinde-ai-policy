@@ -1,6 +1,6 @@
 {
   "name": "kinde-ai-policy",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Decide which AI models, output limits and budgets each Kinde user, organization or agent gets, from their Kinde plan and billing entitlements, and hand the decision to your AI gateway. Reserves budget before the call and settles it after.",
   "type": "module",
   "license": "MIT",
@@ -29,7 +29,8 @@
     "openrouter",
     "litellm",
     "vercel-ai-gateway",
-    "ai-sdk"
+    "ai-sdk",
+    "portkey"
   ],
   "engines": {
     "node": ">=20"
@@ -91,6 +92,26 @@
         "default": "./dist/ai-sdk.cjs"
       }
     },
+    "./litellm": {
+      "import": {
+        "types": "./dist/litellm.d.ts",
+        "default": "./dist/litellm.js"
+      },
+      "require": {
+        "types": "./dist/litellm.d.cts",
+        "default": "./dist/litellm.cjs"
+      }
+    },
+    "./portkey": {
+      "import": {
+        "types": "./dist/portkey.d.ts",
+        "default": "./dist/portkey.js"
+      },
+      "require": {
+        "types": "./dist/portkey.d.cts",
+        "default": "./dist/portkey.cjs"
+      }
+    },
     "./package.json": "./package.json"
   },
   "main": "./dist/index.cjs",
@@ -100,10 +121,11 @@
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --exclude 'test/contract/**' --exclude 'test/live/**'",
+    "test": "vitest run --exclude 'test/contract/**' --exclude 'test/live/**' --exclude 'test/local/**'",
     "test:contract": "vitest run test/contract",
     "prepublishOnly": "npm run typecheck && npm test && npm run build",
-    "test:live": "vitest run test/live"
+    "test:live": "vitest run test/live",
+    "test:gateways": "vitest run test/local"
   },
   "dependencies": {
     "jose": "^6.2.17"
@@ -114,7 +136,8 @@
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "vitest": "^5.1.1",
-    "ai": "^7.0.181"
+    "ai": "^7.0.181",
+    "@portkey-ai/gateway": "^1.15.2"
   },
   "peerDependencies": {
     "ai": ">=6"

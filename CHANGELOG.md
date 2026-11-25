@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0
+
+- Add `kinde-ai-policy/litellm` for the LiteLLM proxy. It sends fallbacks in the `fallbacks` body field, the user in `user`, and `plan:`, `org:` and `agent:` in `metadata.tags`, and settles the cost LiteLLM reports in the `x-litellm-response-cost` header.
+- Add `kinde-ai-policy/portkey` for Portkey, hosted or open source. With `target`, it sends the model and its fallbacks as a fallback config in `x-portkey-config`, one target per model, and it sends `_user`, plan, org and agent in `x-portkey-metadata`.
+- `settle()` from `prepare()` accepts the response headers as a second argument, and `GatewayAdapter.readUsage()` receives them, for gateways that report cost in a header.
+- `npm run test:gateways` runs both adapters against a real LiteLLM proxy and Portkey's open-source gateway, each in front of a local provider that fails on purpose to prove fallbacks.
+
 ## 0.3.0
 
 - Add `kinde-ai-policy/openrouter`. It sends the decision's fallbacks in OpenRouter's `models` field, turns on usage accounting so `settle()` charges the cost OpenRouter reports, and can send app attribution headers.

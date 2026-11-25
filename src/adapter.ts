@@ -36,5 +36,6 @@ export interface Usage {
 export interface GatewayAdapter {
   readonly name: string;
   render(input: RenderInput): Rendered;
-  readUsage(response: unknown): Usage | null;
+  /** Some gateways report cost in a header, so settle() passes the response headers when it has them. */
+  readUsage(response: unknown, headers?: Headers): Usage | null;
 }

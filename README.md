@@ -316,9 +316,38 @@ try {
 
 The middleware works with `generateText` and `streamText`, and with any provider. Before the call it refuses a model the decision does not allow, caps `maxOutputTokens` and reserves budget. After the call, or when a stream finishes, it settles from the usage the call reports, and if the call fails it returns the reservation. With `gateway: "vercel"` it also sends the fallbacks in `providerOptions.gateway`, and `user: true` and `tags: true` add the paid reporting values described above. It defaults to AI SDK 7. Pass `specificationVersion: "v3"` for AI SDK 6.
 
+### LiteLLM
+
+```ts
+import { litellm } from "kinde-ai-policy/litellm";
+
+const call = await ai.prepare(decision, { messages }, litellm({ baseUrl: "http://localhost:4000", apiKey: process.env.LITELLM_MASTER_KEY }));
+const res = await fetch(call.url!, { method: "POST", headers: call.headers, body: JSON.stringify(call.body) });
+await call.settle(await res.json(), res.headers);
+```
+
+The adapter sends the fallbacks in LiteLLM's `fallbacks` body field, which the proxy tries in order when a model fails. It sends the user or agent ID in `user`, which LiteLLM tracks as the end user, and adds `plan:`, `org:` and `agent:` to `metadata.tags` for LiteLLM's spend tracking (`sendTags: false` turns that off). Pass the response headers to `settle()`, as above, and it charges the cost LiteLLM reports in `x-litellm-response-cost`. The model names in your policy are the `model_name` values in your proxy's config.
+
+This works with the open-source proxy. LiteLLM's own JWT authentication is an Enterprise feature, and this package checks the Kinde token in front of the proxy instead.
+
+### Portkey
+
+```ts
+import { portkey } from "kinde-ai-policy/portkey";
+
+const adapter = portkey({
+  apiKey: process.env.PORTKEY_API_KEY,
+  target: (model) => ({ provider: "@openai-prod" }),
+});
+```
+
+With `target`, the adapter sends the model and its fallbacks as a fallback config in the `x-portkey-config` header, one target per model, each with its own `override_params.model`. `target` returns how to reach a model, such as a Model Catalog provider slug, or `{ provider, api_key, custom_host }` for the open-source gateway. `onStatusCodes` limits which errors move to the next model. Portkey reports which target answered in the `x-portkey-last-used-option-index` response header.
+
+The adapter also sends `_user`, `plan`, `org` and `agent` in `x-portkey-metadata`, which appear in Portkey's logs and can group Portkey's usage-limit policies (`sendMetadata: false` turns that off). Pass `baseUrl` for the open-source gateway, which needs no `apiKey`.
+
 ### Any OpenAI-compatible endpoint
 
-`kinde-ai-policy/openai-compatible` works with any endpoint that speaks the OpenAI chat completions API, such as OpenAI itself or a LiteLLM proxy. It sets `model`, caps `max_tokens` (or `max_completion_tokens` with `maxTokensField`), sends the user in `user`, and asks streams to include usage in their last chunk. That API has no fallback field, so this adapter sends no fallbacks.
+`kinde-ai-policy/openai-compatible` works with any endpoint that speaks the OpenAI chat completions API, such as OpenAI itself. It sets `model`, caps `max_tokens` (or `max_completion_tokens` with `maxTokensField`), sends the user in `user`, and asks streams to include usage in their last chunk. That API has no fallback field, so this adapter sends no fallbacks.
 
 ### Your own calls
 
@@ -382,6 +411,8 @@ From the gateway imports:
 - `kinde-ai-policy/openrouter`: `openrouter({ apiKey, baseUrl, app, maxTokensField, sendUser, headers })`.
 - `kinde-ai-policy/vercel`: `vercelGateway({ apiKey, baseUrl, sendTags, maxTokensField, sendUser, headers })`.
 - `kinde-ai-policy/ai-sdk`: `aiPolicyMiddleware(ai, decision, { gateway, user, tags, specificationVersion })`, `PolicyDeniedError` and `usageFromAiSdk()`.
+- `kinde-ai-policy/litellm`: `litellm({ baseUrl, apiKey, sendTags, maxTokensField, sendUser, headers })`.
+- `kinde-ai-policy/portkey`: `portkey({ apiKey, baseUrl, target, onStatusCodes, sendMetadata, maxTokensField, headers })`.
 - `kinde-ai-policy/openai-compatible`: `openaiCompatible({ baseUrl, apiKey, maxTokensField, sendUser, headers })` and `readOpenAIUsage(response)`.
 
 ## What this release covers
@@ -404,7 +435,9 @@ From the gateway imports:
 | OpenRouter adapter with native fallbacks and reported cost | Implemented, tested live against OpenRouter |
 | Vercel AI Gateway adapter with native fallbacks and total debited cost | Implemented, tested live, including a fallback from a missing model |
 | AI SDK middleware for `generateText` and `streamText` | Implemented, tested with AI SDK 7 and live through Vercel AI Gateway |
-| LiteLLM, Portkey and Cloudflare AI Gateway adapters | Planned |
+| LiteLLM adapter with native fallbacks and reported cost | Implemented, tested against a local LiteLLM proxy |
+| Portkey adapter with fallback configs and metadata | Implemented, tested against Portkey's open-source gateway |
+| Cloudflare AI Gateway adapter | Planned |
 | Redis and Upstash budget stores | Planned |
 | An agent acting for a user | Planned |
 | Reporting usage to Kinde billing meters | Planned |

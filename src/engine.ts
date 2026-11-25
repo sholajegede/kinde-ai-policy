@@ -82,8 +82,11 @@ export interface Reservation {
 }
 
 export interface Prepared extends Rendered, Omit<Reservation, "settle"> {
-  /** Charges what the call used. Pass the gateway's response, its last streamed chunk, or a Usage object. */
-  settle(result?: unknown): Promise<Settlement>;
+  /**
+   * Charges what the call used. Pass the gateway's parsed response, its last streamed chunk, or a Usage object,
+   * and the response headers for gateways that report cost in a header, such as LiteLLM.
+   */
+  settle(result?: unknown, headers?: Headers): Promise<Settlement>;
 }
 
 export interface AiPolicyEngine {
@@ -457,7 +460,8 @@ export function createAiPolicy(options: AiPolicyOptions): AiPolicyEngine {
     return {
       ...reservation,
       ...rendered,
-      settle: (result?: unknown) => reservation.settle(isUsage(result) ? result : result === undefined ? null : adapter.readUsage(result)),
+      settle: (result?: unknown, headers?: Headers) =>
+        reservation.settle(isUsage(result) ? result : result === undefined ? null : adapter.readUsage(result, headers)),
     };
   }
 
